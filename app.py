@@ -7,7 +7,14 @@ from queue import Queue
 from twelvelabs import TwelveLabs
 from twelvelabs.models.task import Task
 import threading
+import concurrent.futures
 import time
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+API_KEY = os.getenv("API_KEY")
 
 # Initialize session state
 if 'index' not in st.session_state:
@@ -62,8 +69,8 @@ def index_video(file_path, index_id, client, status_placeholder):
         return True, task.video_id
     except Exception as e:
         return False, str(e)
-
-def download_video(url, index_queue):
+def download_video(url):
+    """Download a video without using queue"""
     if not url:
         return None, None
     
@@ -80,13 +87,12 @@ def download_video(url, index_queue):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
-            index_queue.put(filename)
             return filename, info.get('title', '')
     except Exception as e:
         return None, str(e)
 
 def process_indexing_queue(queue, index_id, status_placeholder):
-    client = TwelveLabs(api_key="tlk_32YBVAW1GVJHV42ASQ5KB3WEJYW1")
+    client = TwelveLabs(api_key=API_KEY)
     
     while True:
         file_path = queue.get()
@@ -255,42 +261,102 @@ def get_channel_videos(channel_url, option):
     except Exception as e:
         return False, f"Error: {str(e)}"
 
+
 def process_videos(video_info, download_status, indexing_status):
+
     try:
+        client = TwelveLabs(api_key=API_KEY)
         video_urls = [info['url'] for info in video_info]
         st.session_state.total_videos = len(video_urls)
         st.session_state.indexed_count = 0
         downloads_dir = get_downloads_folder()
         st.info(f"📂 Videos will be saved to: {downloads_dir}")
-        
 
-        index_queue = Queue()
-        indexing_thread = threading.Thread(
-            target=process_indexing_queue,
-            args=(index_queue, st.session_state.index.id, indexing_status)
-        )
-        indexing_thread.start()
-        
+   
+        downloaded_files = {}
+
+        status_containers = {}
+        for i in range(len(video_info)):
+            status_containers[i] = st.container()
+
+
         with ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_url = {
-                executor.submit(download_video, url, index_queue): (i, url)
-                for i, url in enumerate(video_urls)
+            future_to_video = {
+                executor.submit(download_video, info['url']): (i, info)
+                for i, info in enumerate(video_info)
             }
-            
-            for future in future_to_url:
-                i, url = future_to_url[future]
-                filename, title_or_error = future.result()
-                
-                if filename and os.path.exists(filename):
-                    download_status.success(f"✅ Downloaded: {title_or_error}")
-                else:
-                    download_status.error(f"❌ Error downloading video #{i+1}: {title_or_error}")
+
+            for future in concurrent.futures.as_completed(future_to_video):
+                i, info = future_to_video[future]
+                try:
+                    filename, title = future.result()
+                    if filename and os.path.exists(filename):
+                        with status_containers[i]:
+                            st.success(f"""
+                            ✅ Video #{i + 1}: Downloaded
+                            📁 File: {title}
+                            """)
+                        downloaded_files[i] = (filename, title)
+                    else:
+                        with status_containers[i]:
+                            st.error(f"❌ Video #{i + 1}: Download failed - {title}")
+                except Exception as e:
+                    with status_containers[i]:
+                        st.error(f"❌ Video #{i + 1}: Download error - {str(e)}")
+
+
+        st.info("🔄 Starting indexing process for downloaded videos...")
         
-        index_queue.put(None)
-        indexing_thread.join()
+        for i, (filename, title) in downloaded_files.items():
+            try:
+                with status_containers[i]:
+                    st.info(f"🔍 Starting indexing for: {title}")
+                    progress_bar = st.progress(0)
+                    
+                    task = client.task.create(
+                        index_id=st.session_state.index.id,
+                        file=filename
+                    )
+                    
+                    start_time = time.time()
+                    
+                    def on_task_update(task: Task):
+                        elapsed_time = int(time.time() - start_time)
+                        if task.status == "processing":
+                            progress = min(0.95, elapsed_time / 180)
+                            progress_bar.progress(progress)
+                            st.info(f"""
+                            🎥 Currently indexing: {title}
+                            ⏳ Status: {task.status}
+                            ⌛ Time elapsed: {elapsed_time} seconds
+                            """)
+                    
+                    task.wait_for_done(sleep_interval=5, callback=on_task_update)
+                    
+                    if task.status == "ready":
+                        progress_bar.progress(1.0)
+                        st.success(f"""
+                        ✅ Successfully indexed: {title}
+                        🎯 Video ID: {task.video_id}
+                        ⌛ Total time: {int(time.time() - start_time)} seconds
+                        """)
+                        st.session_state.indexed_count += 1
+                    else:
+                        st.error(f"❌ Indexing failed for {title} with status: {task.status}")
+                
+            except Exception as e:
+                with status_containers[i]:
+                    st.error(f"❌ Indexing error for {title}: {str(e)}")
+
+        st.success(f"""
+        ✅ All processing completed!
+        📊 Total videos indexed: {st.session_state.indexed_count}/{len(downloaded_files)}
+        📁 Videos saved in: {downloads_dir}
+        """)
         return True
+
     except Exception as e:
-        st.error(f"Error during processing: {str(e)}")
+        st.error(f"❌ Error during processing: {str(e)}")
         return False
 
 def channel_videos_section():
@@ -350,26 +416,17 @@ def channel_videos_section():
                 - Views: {info['views']}
                 """)
         
-
         with col2:
             if st.button("Process Videos"):
                 download_status = st.empty()
                 indexing_status = st.empty()
                 
                 with st.spinner("Processing videos..."):
-                    success = process_videos(
+                    process_videos(
                         st.session_state.fetched_videos,
                         download_status,
                         indexing_status
                     )
-                    
-                    if success:
-                        st.success(f"""
-                        ✅ All channel videos processed!
-                        📊 Total videos processed: {st.session_state.indexed_count}/{st.session_state.total_videos}
-                        """)
-                    else:
-                        st.error("Failed to process videos. Please try again.")
 
 
 def main():
