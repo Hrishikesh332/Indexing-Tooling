@@ -8,6 +8,7 @@ from twelvelabs import TwelveLabs
 from twelvelabs.models.task import Task
 import threading
 import time
+
 # Initialize session state
 if 'index' not in st.session_state:
     st.session_state.index = None
@@ -17,10 +18,18 @@ if 'indexed_count' not in st.session_state:
     st.session_state.indexed_count = 0
 if 'total_videos' not in st.session_state:
     st.session_state.total_videos = 0
+
+if 'fetched_videos' not in st.session_state:
+    st.session_state.fetched_videos = None
+if 'fetch_status' not in st.session_state:
+    st.session_state.fetch_status = None
+
 def get_downloads_folder():
     return str(Path.home() / "Downloads" / "YouTubeDownloads")
+
 def index_video(file_path, index_id, client, status_placeholder):
     try:
+
         st.session_state.current_indexing = os.path.basename(file_path)
         status_placeholder.info(f"🎥 Currently indexing: {st.session_state.current_indexing}")
         
@@ -42,8 +51,10 @@ def index_video(file_path, index_id, client, status_placeholder):
             ⏳ Status: {task.status}
             ⌛ Time elapsed: {elapsed_time} seconds
             """)
+
         task.wait_for_done(sleep_interval=5, callback=on_task_update)
         progress_bar.progress(1.0)
+
         if task.status != "ready":
             return False, f"Indexing failed with status {task.status}"
             
@@ -51,6 +62,7 @@ def index_video(file_path, index_id, client, status_placeholder):
         return True, task.video_id
     except Exception as e:
         return False, str(e)
+
 def download_video(url, index_queue):
     if not url:
         return None, None
@@ -72,6 +84,7 @@ def download_video(url, index_queue):
             return filename, info.get('title', '')
     except Exception as e:
         return None, str(e)
+
 def process_indexing_queue(queue, index_id, status_placeholder):
     client = TwelveLabs(api_key="tlk_32YBVAW1GVJHV42ASQ5KB3WEJYW1")
     
@@ -92,9 +105,12 @@ def process_indexing_queue(queue, index_id, status_placeholder):
             status_placeholder.error(f"❌ Indexing failed for {os.path.basename(file_path)}: {result}")
         
         queue.task_done()
+
 def video_urls_section():
     st.header("Video URLs")
+
     index_name = st.text_input("Enter Index Name:", key="index_name")
+
     if st.button("Create Index") and index_name and not st.session_state.index:
         with st.spinner("Creating index..."):
             client = TwelveLabs(api_key=API_KEY)
@@ -126,6 +142,7 @@ def video_urls_section():
     for i in range(5):
         url = st.text_input(f"Video URL #{i+1}:", key=f"url_{i}")
         urls.append(url)
+
     if st.button("Download and Index"):
         valid_urls = [url for url in urls if url]
         if not valid_urls:
@@ -163,17 +180,201 @@ def video_urls_section():
                     elif url:
                         download_status.error(f"❌ Error downloading video #{i+1}: {title_or_error}")
         
+
         index_queue.put(None)
         indexing_thread.join()
         st.success(f"""
         ✅ All processing completed!
         📊 Total videos processed: {st.session_state.indexed_count}/{st.session_state.total_videos}
         """)
+
+
+def get_channel_videos(channel_url, option):
+    """Extract videos from channel based on selected option"""
+    try:
+        limit = 5 if option == "5_newest" else 10
+
+        ydl_opts = {
+            'extract_flat': 'in_playlist',
+            'quiet': True,
+            'no_warnings': True,
+            'playlistend': limit * 2,
+            'playlist_items': f'1:{limit * 2}',
+            'ignoreerrors': True,
+            'extractor_args': {
+                'youtube': {
+                    'skip': ['dash', 'hls'],
+                    'player_skip': ['js', 'configs', 'webpage']
+                }
+            }
+        }
+
+ 
+        if "oldest" in option:
+            ydl_opts['playlistreverse'] = True
+        elif "popular" in option:
+            channel_url = f"{channel_url}/videos?view=0&sort=p&flow=grid"
+        else:  
+            channel_url = f"{channel_url}/videos?view=0&sort=dd&flow=grid"
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            channel_info = ydl.extract_info(channel_url, download=False)
+            
+            if not channel_info:
+                return False, "Could not fetch channel information"
+
+            videos = []
+            if 'entries' in channel_info:
+                videos = [entry for entry in channel_info['entries'] if entry is not None]
+            
+            if not videos:
+                return False, "No videos found in channel"
+
+            if option == "10_popular":
+                videos.sort(key=lambda x: x.get('view_count', 0) if x.get('view_count') is not None else 0, reverse=True)
+
+            videos = videos[:limit]
+
+            video_info = []
+            for video in videos:
+                if video and 'id' in video:
+                    url = f"https://www.youtube.com/watch?v={video['id']}"
+                    title = video.get('title', 'Untitled')
+                    view_count = video.get('view_count', 'N/A')
+                    video_info.append({
+                        'url': url,
+                        'title': title,
+                        'views': view_count
+                    })
+
+            if not video_info:
+                return False, "Could not extract valid video URLs"
+
+            return True, video_info
+
+    except Exception as e:
+        return False, f"Error: {str(e)}"
+
+def process_videos(video_info, download_status, indexing_status):
+    try:
+        video_urls = [info['url'] for info in video_info]
+        st.session_state.total_videos = len(video_urls)
+        st.session_state.indexed_count = 0
+        downloads_dir = get_downloads_folder()
+        st.info(f"📂 Videos will be saved to: {downloads_dir}")
+        
+
+        index_queue = Queue()
+        indexing_thread = threading.Thread(
+            target=process_indexing_queue,
+            args=(index_queue, st.session_state.index.id, indexing_status)
+        )
+        indexing_thread.start()
+        
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_url = {
+                executor.submit(download_video, url, index_queue): (i, url)
+                for i, url in enumerate(video_urls)
+            }
+            
+            for future in future_to_url:
+                i, url = future_to_url[future]
+                filename, title_or_error = future.result()
+                
+                if filename and os.path.exists(filename):
+                    download_status.success(f"✅ Downloaded: {title_or_error}")
+                else:
+                    download_status.error(f"❌ Error downloading video #{i+1}: {title_or_error}")
+        
+        index_queue.put(None)
+        indexing_thread.join()
+        return True
+    except Exception as e:
+        st.error(f"Error during processing: {str(e)}")
+        return False
+
 def channel_videos_section():
     st.header("Channel Videos")
-    st.info("Still in Progress")
+    
+    if not st.session_state.index:
+        st.warning("Please create an index in the Video URLs tab first!")
+        return
+    
+    channel_url = st.text_input(
+        "Enter YouTube Channel URL:",
+        placeholder="https://www.youtube.com/channel/... or https://www.youtube.com/@..."
+    )
+    
+    option = st.selectbox(
+        "Select videos to process:",
+        [
+            "5_newest",
+            "10_newest",
+            "10_oldest",
+            "10_popular"
+        ],
+        format_func=lambda x: {
+            "5_newest": "5 Newest Videos",
+            "10_newest": "10 Newest Videos",
+            "10_oldest": "10 Oldest Videos",
+            "10_popular": "10 Most Popular Videos"
+        }[x]
+    )
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        if st.button("Fetch Videos"):
+            if not channel_url:
+                st.warning("Please enter a channel URL!")
+                return
+                
+            with st.spinner("Fetching channel videos..."):
+                success, result = get_channel_videos(channel_url, option)
+                
+                if success:
+                    st.session_state.fetched_videos = result
+                    st.session_state.fetch_status = 'success'
+                else:
+                    st.session_state.fetch_status = 'error'
+                    st.error(f"Error fetching videos: {result}")
+    
+    if st.session_state.fetch_status == 'success' and st.session_state.fetched_videos:
+        st.success(f"Found {len(st.session_state.fetched_videos)} videos to process")
+        
+        with st.expander("Preview videos to be processed", expanded=True):
+            for i, info in enumerate(st.session_state.fetched_videos, 1):
+                st.markdown(f"""
+                **{i}. {info['title']}**
+                - URL: {info['url']}
+                - Views: {info['views']}
+                """)
+        
+
+        with col2:
+            if st.button("Process Videos"):
+                download_status = st.empty()
+                indexing_status = st.empty()
+                
+                with st.spinner("Processing videos..."):
+                    success = process_videos(
+                        st.session_state.fetched_videos,
+                        download_status,
+                        indexing_status
+                    )
+                    
+                    if success:
+                        st.success(f"""
+                        ✅ All channel videos processed!
+                        📊 Total videos processed: {st.session_state.indexed_count}/{st.session_state.total_videos}
+                        """)
+                    else:
+                        st.error("Failed to process videos. Please try again.")
+
+
 def main():
     st.title("YouTube Video Processor and Indexing")
+
     tab1, tab2 = st.tabs(["Video URLs", "Channel Videos"])
     
     with tab1:
@@ -181,5 +382,6 @@ def main():
     
     with tab2:
         channel_videos_section()
+
 if __name__ == "__main__":
     main()
