@@ -1,0 +1,6 @@
+streamlit
+twelvelabs
+python-dotenv
+requests
+yt_dlp
+threading
