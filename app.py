@@ -124,7 +124,7 @@ def video_urls_section():
             models = [
                 {
                     "name": "marengo2.7",
-                    "options": ["visual", "conversation", "text_in_video", "logo"]
+                    "options": ["visual", "audio"]
                 }
             ]
             
@@ -132,7 +132,6 @@ def video_urls_section():
                 index = client.index.create(
                     name=index_name,
                     models=models,
-                    model_options=[visual, audio],
                     addons=["thumbnail"]
                 )
                 st.session_state.index = index
