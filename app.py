@@ -132,6 +132,7 @@ def video_urls_section():
                 index = client.index.create(
                     name=index_name,
                     models=models,
+                    model_options=[visual, audio],
                     addons=["thumbnail"]
                 )
                 st.session_state.index = index
