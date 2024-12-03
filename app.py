@@ -123,7 +123,7 @@ def video_urls_section():
             
             models = [
                 {
-                    "name": "marengo2.6",
+                    "name": "marengo2.7",
                     "options": ["visual", "conversation", "text_in_video", "logo"]
                 }
             ]
