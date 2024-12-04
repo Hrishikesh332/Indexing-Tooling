@@ -662,7 +662,6 @@ def channel_videos_section():
 
 
 def initial_setup():
-
     st.title("Index UGC with Twelve Labs")
     
     api_key = st.text_input(
@@ -676,6 +675,11 @@ def initial_setup():
         "Enter Index Name:",
         help="Choose a unique name for your video index"
     )
+
+    st.subheader("Model Selection")
+    st.info("Marengo 2.7 as the default model for all indexes.")
+
+    use_pegasus = st.checkbox("Add Pegasus 1.1 to enhance indexing capabilities")
     
     if st.button("Initialize Application"):
         if not api_key:
@@ -687,13 +691,20 @@ def initial_setup():
             
         try:
             with st.spinner("Setting up your index..."):
-            
                 client = TwelveLabs(api_key=api_key)
                 
-                models = [{
-                    "name": "marengo2.7",
-                    "options": ["visual", "audio"]
-                }]
+                models = [
+                    {
+                        "name": "marengo2.7",
+                        "options": ["visual", "audio"]
+                    }
+                ]
+                
+                if use_pegasus:
+                    models.insert(0, {
+                        "name": "pegasus1.1",
+                        "options": ["visual", "audio"]
+                    })
                 
                 index = client.index.create(
                     name=index_name,
@@ -705,7 +716,11 @@ def initial_setup():
                 st.session_state.index = index
                 st.session_state.setup_complete = True
                 
-                st.success("✅ Setup completed successfully!")
+                model_names = [model["name"] for model in models]
+                st.success(f"""
+                ✅ Setup completed successfully!
+                📊 Active Models: {", ".join(model_names)}
+                """)
                 time.sleep(1)
                 st.rerun()
                 
