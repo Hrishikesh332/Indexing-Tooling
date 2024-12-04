@@ -9,6 +9,12 @@ from twelvelabs.models.task import Task
 import threading
 import concurrent.futures
 import time
+from googleapiclient.discovery import build
+from datetime import datetime, timezone
+from datetime import datetime
+import isodate
+import re
+
 from dotenv import load_dotenv
 
 
@@ -16,7 +22,7 @@ load_dotenv()
 
 API_KEY = os.getenv("API_KEY")
 print(API_KEY)
-# Initialize session state
+
 if 'index' not in st.session_state:
     st.session_state.index = None
 if 'current_indexing' not in st.session_state:
@@ -70,7 +76,7 @@ def index_video(file_path, index_id, client, status_placeholder):
     except Exception as e:
         return False, str(e)
 def download_video(url):
-    """Download a video without using queue"""
+
     if not url:
         return None, None
     
@@ -100,7 +106,7 @@ def process_indexing_queue(queue, index_id, status_placeholder):
             break
             
         try:
-            print(f"Starting indexing for: {file_path}")  # Debug log
+            print(f"Starting indexing for: {file_path}") 
             st.session_state.current_indexing = os.path.basename(file_path)
             
             task = client.task.create(
@@ -109,7 +115,7 @@ def process_indexing_queue(queue, index_id, status_placeholder):
             )
             
             start_time = time.time()
-            print(f"Task created with ID: {task.id}")  # Debug log
+            print(f"Task created with ID: {task.id}") 
             
             while task.status not in ["ready", "failed"]:
                 elapsed_time = int(time.time() - start_time)
@@ -118,15 +124,15 @@ def process_indexing_queue(queue, index_id, status_placeholder):
                 task.refresh()
             
             if task.status == "ready":
-                print(f"Task completed successfully")  # Debug log
+                print(f"Task completed successfully")
                 st.session_state.indexed_count += 1
             else:
-                print(f"Task failed with status: {task.status}")  # Debug log
+                print(f"Task failed with status: {task.status}") 
                 
             queue.task_done()
             
         except Exception as e:
-            print(f"Error during indexing: {str(e)}")  # Debug log
+            print(f"Error during indexing: {str(e)}") 
             queue.task_done()
             continue
 
@@ -215,71 +221,248 @@ def video_urls_section():
             st.error("❌ No videos were successfully indexed")
 
 def get_channel_videos(channel_url, option):
-    """Extract videos from channel based on selected option"""
+ 
     try:
-        limit = 5 if option == "5_newest" else 10
+  
+        if option in ["5_newest", "10_newest"]:
+            limit = 5 if option == "5_newest" else 10
 
-        ydl_opts = {
-            'extract_flat': 'in_playlist',
-            'quiet': True,
-            'no_warnings': True,
-            'playlistend': limit * 2,
-            'playlist_items': f'1:{limit * 2}',
-            'ignoreerrors': True,
-            'extractor_args': {
-                'youtube': {
-                    'skip': ['dash', 'hls'],
-                    'player_skip': ['js', 'configs', 'webpage']
+            ydl_opts = {
+                'extract_flat': 'in_playlist',
+                'quiet': True,
+                'no_warnings': True,
+                'playlistend': limit * 2,
+                'playlist_items': f'1:{limit * 2}',
+                'ignoreerrors': True,
+                'extractor_args': {
+                    'youtube': {
+                        'skip': ['dash', 'hls'],
+                        'player_skip': ['js', 'configs', 'webpage']
+                    }
                 }
             }
-        }
 
- 
-        if "oldest" in option:
-            ydl_opts['playlistreverse'] = True
-        elif "popular" in option:
-            channel_url = f"{channel_url}/videos?view=0&sort=p&flow=grid"
-        else:  
             channel_url = f"{channel_url}/videos?view=0&sort=dd&flow=grid"
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            channel_info = ydl.extract_info(channel_url, download=False)
             
-            if not channel_info:
-                return False, "Could not fetch channel information"
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                channel_info = ydl.extract_info(channel_url, download=False)
+                
+                if not channel_info:
+                    return False, "Could not fetch channel information"
 
-            videos = []
-            if 'entries' in channel_info:
-                videos = [entry for entry in channel_info['entries'] if entry is not None]
+                videos = []
+                if 'entries' in channel_info:
+                    videos = [entry for entry in channel_info['entries'] if entry is not None]
+                
+                if not videos:
+                    return False, "No videos found in channel"
+
+                videos = videos[:limit]
+
+                video_info = []
+                for video in videos:
+                    if video and 'id' in video:
+                        url = f"https://www.youtube.com/watch?v={video['id']}"
+                        title = video.get('title', 'Untitled')
+                        view_count = video.get('view_count', 'N/A')
+                        video_info.append({
+                            'url': url,
+                            'title': title,
+                            'views': view_count
+                        })
+
+                if not video_info:
+                    return False, "Could not extract valid video URLs"
+
+                return True, video_info
+
+        else:
+            channel_id = get_channel_id_from_url(channel_url)
+            if not channel_id:
+                return False, "Could not extract channel ID"
             
-            if not videos:
-                return False, "No videos found in channel"
-
-            if option == "10_popular":
-                videos.sort(key=lambda x: x.get('view_count', 0) if x.get('view_count') is not None else 0, reverse=True)
-
-            videos = videos[:limit]
-
-            video_info = []
-            for video in videos:
-                if video and 'id' in video:
-                    url = f"https://www.youtube.com/watch?v={video['id']}"
-                    title = video.get('title', 'Untitled')
-                    view_count = video.get('view_count', 'N/A')
-                    video_info.append({
-                        'url': url,
-                        'title': title,
-                        'views': view_count
-                    })
-
-            if not video_info:
-                return False, "Could not extract valid video URLs"
-
-            return True, video_info
+            if option == "10_oldest":
+                return get_old_videos(channel_id, 10)
+            elif option == "10_popular":
+                return get_popular_videos(channel_id, 10)
 
     except Exception as e:
         return False, f"Error: {str(e)}"
 
+def get_channel_id_from_url(channel_url):
+
+    youtube = build('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
+    
+    try:
+
+        if '/channel/' in channel_url:
+            return channel_url.split('/channel/')[-1].split('/')[0]
+        
+        elif '/@' in channel_url:
+            custom_handle = channel_url.split('/@')[-1].split('/')[0]
+            
+
+            request = youtube.search().list(
+                part="snippet",
+                q=custom_handle,
+                type="channel",
+                maxResults=1
+            )
+            response = request.execute()
+            
+            if response.get('items'):
+                channel_id = response['items'][0]['snippet']['channelId']
+                print(f"Found channel ID: {channel_id} for handle: {custom_handle}")
+                return channel_id
+        
+        request = youtube.search().list(
+            part="snippet",
+            q=channel_url,
+            type="channel",
+            maxResults=1
+        )
+        response = request.execute()
+        
+        if response.get('items'):
+            channel_id = response['items'][0]['snippet']['channelId']
+            print(f"Found channel ID through search: {channel_id}")
+            return channel_id
+        
+        return None
+        
+    except Exception as e:
+        print(f"Error in get_channel_id_from_url: {str(e)}")  
+        return None
+
+def get_old_videos(channel_id, limit=10):
+
+    youtube = build('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
+    
+    try:
+
+        channel_response = youtube.channels().list(
+            part="statistics,contentDetails",
+            id=channel_id
+        ).execute()
+        
+        if not channel_response.get('items'):
+            return False, "Channel not found"
+            
+        total_videos = int(channel_response['items'][0]['statistics']['videoCount'])
+        uploads_playlist_id = channel_response['items'][0]['contentDetails']['relatedPlaylists']['uploads']
+        
+        print(f"Channel has {total_videos} total videos")
+        
+        items_per_page = 50
+        pages_to_skip = (total_videos - 50) // items_per_page
+        
+        next_page_token = None
+        current_page = 0
+        
+        while current_page < pages_to_skip:
+            response = youtube.playlistItems().list(
+                part="snippet",
+                playlistId=uploads_playlist_id,
+                maxResults=50,
+                pageToken=next_page_token
+            ).execute()
+            next_page_token = response.get('nextPageToken')
+            if not next_page_token:
+                break
+            current_page += 1
+            print(f"Skipping page {current_page}/{pages_to_skip}")
+        
+        final_response = youtube.playlistItems().list(
+            part="snippet",
+            playlistId=uploads_playlist_id,
+            maxResults=50,
+            pageToken=next_page_token
+        ).execute()
+
+        videos_data = []
+        for item in final_response['items']:
+            publish_date = item['snippet']['publishedAt']
+            video_id = item['snippet']['resourceId']['videoId']
+            videos_data.append({
+                'video_id': video_id,
+                'publish_date': publish_date,
+                'title': item['snippet']['title']
+            })
+        
+        videos_data.sort(key=lambda x: x['publish_date'])
+        
+        final_videos = []
+        for video in videos_data[:limit]:
+            video_response = youtube.videos().list(
+                part="statistics,snippet",
+                id=video['video_id']
+            ).execute()
+            
+            if video_response['items']:
+                video_details = video_response['items'][0]
+                publish_date = video_details['snippet']['publishedAt']
+                formatted_date = datetime.fromisoformat(publish_date.replace('Z', '+00:00')).strftime('%Y-%m-%d')
+                
+                video_info = {
+                    'url': f"https://www.youtube.com/watch?v={video['video_id']}",
+                    'title': video_details['snippet']['title'],
+                    'views': int(video_details['statistics']['viewCount']),
+                    'published': formatted_date
+                }
+                final_videos.append(video_info)
+                print(f"Found oldest video: {video_info['title']} (Published: {formatted_date})")
+        
+        final_videos.sort(key=lambda x: x['published'])
+        return True, final_videos[:limit]
+        
+    except Exception as e:
+        print(f"Error in get_old_videos: {str(e)}")
+        return False, f"Error fetching old videos: {str(e)}"
+
+def get_popular_videos(channel_id, limit=10):
+    youtube = build('youtube', 'v3', developerKey=os.getenv('YOUTUBE_API_KEY'))
+    
+    try:
+        print(f"Fetching popular videos for channel ID: {channel_id}")
+        
+        request = youtube.search().list(
+            part="id,snippet",
+            channelId=channel_id,
+            maxResults=limit,
+            order="viewCount", 
+            type="video"
+        )
+        response = request.execute()
+        
+        print(f"Initial API response: {response.get('pageInfo')}")
+        
+        videos = []
+        if 'items' in response:
+            for item in response['items']:
+                video_id = item['id']['videoId']
+                
+                video_request = youtube.videos().list(
+                    part="statistics,snippet",
+                    id=video_id
+                )
+                video_response = video_request.execute()
+                
+                if video_response['items']:
+                    video_details = video_response['items'][0]
+                    video_info = {
+                        'url': f"https://www.youtube.com/watch?v={video_id}",
+                        'title': video_details['snippet']['title'],
+                        'views': int(video_details['statistics']['viewCount'])
+                    }
+                    videos.append(video_info)
+                    print(f"Added video: {video_info['title']} with {video_info['views']} views")  # Debug log
+        
+        videos.sort(key=lambda x: x['views'], reverse=True)
+        return True, videos[:limit]
+        
+    except Exception as e:
+        print(f"Error in get_popular_videos: {str(e)}")  
+        return False, f"Error fetching popular videos: {str(e)}"
 
 def process_videos(video_info, download_status, indexing_status):
 
