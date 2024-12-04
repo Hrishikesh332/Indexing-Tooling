@@ -139,17 +139,17 @@ def video_urls_section():
         with st.spinner("Creating index..."):
             client = TwelveLabs(api_key=API_KEY)
             
-            engines = [
+            models = [
                 {
-                    "name": "marengo2.6",
-                    "options": ["visual", "conversation", "text_in_video", "logo"]
+                    "name": "marengo2.7",
+                    "options": ["visual", "audio"]
                 }
             ]
             
             try:
                 index = client.index.create(
                     name=index_name,
-                    engines=engines,
+                    models=models,
                     addons=["thumbnail"]
                 )
                 st.session_state.index = index
