@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 API_KEY = os.getenv("API_KEY")
-
+print(API_KEY)
 # Initialize session state
 if 'index' not in st.session_state:
     st.session_state.index = None
@@ -99,18 +99,36 @@ def process_indexing_queue(queue, index_id, status_placeholder):
         if file_path is None:
             break
             
-        success, result = index_video(file_path, index_id, client, status_placeholder)
-        
-        if success:
-            status_placeholder.success(f"""
-            ✅ Successfully indexed: {os.path.basename(file_path)}
-            🎯 Video ID: {result}
-            📊 Progress: {st.session_state.indexed_count}/{st.session_state.total_videos}
-            """)
-        else:
-            status_placeholder.error(f"❌ Indexing failed for {os.path.basename(file_path)}: {result}")
-        
-        queue.task_done()
+        try:
+            print(f"Starting indexing for: {file_path}")  # Debug log
+            st.session_state.current_indexing = os.path.basename(file_path)
+            
+            task = client.task.create(
+                index_id=index_id,
+                file=file_path,
+            )
+            
+            start_time = time.time()
+            print(f"Task created with ID: {task.id}")  # Debug log
+            
+            while task.status not in ["ready", "failed"]:
+                elapsed_time = int(time.time() - start_time)
+                print(f"Task status: {task.status}, elapsed time: {elapsed_time}s")  # Debug log
+                time.sleep(5)
+                task.refresh()
+            
+            if task.status == "ready":
+                print(f"Task completed successfully")  # Debug log
+                st.session_state.indexed_count += 1
+            else:
+                print(f"Task failed with status: {task.status}")  # Debug log
+                
+            queue.task_done()
+            
+        except Exception as e:
+            print(f"Error during indexing: {str(e)}")  # Debug log
+            queue.task_done()
+            continue
 
 def video_urls_section():
     st.header("Video URLs")
@@ -160,40 +178,41 @@ def video_urls_section():
         downloads_dir = get_downloads_folder()
         st.info(f"📂 Videos will be saved to {downloads_dir}")
         
-        download_status = st.empty()
-        indexing_status = st.empty()
+        status_container = st.container()
         
         index_queue = Queue()
         indexing_thread = threading.Thread(
             target=process_indexing_queue,
-            args=(index_queue, st.session_state.index.id, indexing_status)
+            args=(index_queue, st.session_state.index.id, status_container)
         )
         indexing_thread.start()
         
         with st.spinner("Processing videos..."):
             with ThreadPoolExecutor(max_workers=5) as executor:
                 future_to_url = {
-                    executor.submit(download_video, url, index_queue): (i, url)
+                    executor.submit(download_video, url): (i, url)
                     for i, url in enumerate(valid_urls)
                 }
                 
-                for future in future_to_url:
+                for future in concurrent.futures.as_completed(future_to_url):
                     i, url = future_to_url[future]
-                    filename, title_or_error = future.result()
-                    
-                    if filename and os.path.exists(filename):
-                        download_status.success(f"✅ Downloaded: {title_or_error}")
-                    elif url:
-                        download_status.error(f"❌ Error downloading video #{i+1}: {title_or_error}")
-        
+                    try:
+                        filename, title_or_error = future.result()
+                        if filename and os.path.exists(filename):
+                            st.success(f"✅ Downloaded: {title_or_error}")
+                            index_queue.put(filename)
+                        elif url:
+                            st.error(f"❌ Error downloading video #{i+1}: {title_or_error}")
+                    except Exception as e:
+                        st.error(f"❌ Error processing video #{i+1}: {str(e)}")
 
         index_queue.put(None)
         indexing_thread.join()
-        st.success(f"""
-        ✅ All processing completed!
-        📊 Total videos processed: {st.session_state.indexed_count}/{st.session_state.total_videos}
-        """)
-
+        
+        if st.session_state.indexed_count > 0:
+            st.success(f"✅ Successfully indexed {st.session_state.indexed_count} videos")
+        else:
+            st.error("❌ No videos were successfully indexed")
 
 def get_channel_videos(channel_url, option):
     """Extract videos from channel based on selected option"""
