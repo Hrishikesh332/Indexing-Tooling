@@ -20,8 +20,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-API_KEY = os.getenv("API_KEY")
-print(API_KEY)
+
+if 'setup_complete' not in st.session_state:
+    st.session_state.setup_complete = False
+if 'api_key' not in st.session_state:
+    st.session_state.api_key = None
 
 if 'index' not in st.session_state:
     st.session_state.index = None
@@ -31,6 +34,7 @@ if 'indexed_count' not in st.session_state:
     st.session_state.indexed_count = 0
 if 'total_videos' not in st.session_state:
     st.session_state.total_videos = 0
+
 
 if 'fetched_videos' not in st.session_state:
     st.session_state.fetched_videos = None
@@ -44,7 +48,7 @@ def index_video(file_path, index_id, client, status_placeholder):
     try:
 
         st.session_state.current_indexing = os.path.basename(file_path)
-        status_placeholder.info(f"🎥 Currently indexing: {st.session_state.current_indexing}")
+        status_placeholder.info(f"🎥 Currently indexing {st.session_state.current_indexing}")
         
         task = client.task.create(
             index_id=index_id,
@@ -96,129 +100,159 @@ def download_video(url):
             return filename, info.get('title', '')
     except Exception as e:
         return None, str(e)
-
-def process_indexing_queue(queue, index_id, status_placeholder):
-    client = TwelveLabs(api_key=API_KEY)
     
-    while True:
-        file_path = queue.get()
-        if file_path is None:
-            break
-            
-        try:
-            print(f"Starting indexing for: {file_path}") 
-            st.session_state.current_indexing = os.path.basename(file_path)
-            
-            task = client.task.create(
-                index_id=index_id,
-                file=file_path,
-            )
-            
-            start_time = time.time()
-            print(f"Task created with ID: {task.id}") 
-            
-            while task.status not in ["ready", "failed"]:
-                elapsed_time = int(time.time() - start_time)
-                print(f"Task status: {task.status}, elapsed time: {elapsed_time}s")  # Debug log
-                time.sleep(5)
-                task.refresh()
-            
-            if task.status == "ready":
-                print(f"Task completed successfully")
-                st.session_state.indexed_count += 1
-            else:
-                print(f"Task failed with status: {task.status}") 
+
+
+# def _get_api_key():
+#        return st.session_state.api_key
+def process_indexing_queue(queue, index_id, status_placeholder, api_key):
+
+    try:
+        client = TwelveLabs(api_key=api_key)
+        successful_tasks = 0  
+        
+        while True:
+            file_path = queue.get()
+            if file_path is None:
+                break
                 
-            queue.task_done()
+            try:
+                print(f"Starting indexing for: {file_path}")
+                
+                task = client.task.create(
+                    index_id=index_id,
+                    file=file_path,
+                )
+                
+                print(f"Task created with ID: {task.id}")
             
-        except Exception as e:
-            print(f"Error during indexing: {str(e)}") 
-            queue.task_done()
-            continue
+                def on_task_update(task: Task):
+                    print(f"  Status={task.status}")
+                    if task.status == "ready":
+                        nonlocal successful_tasks
+                        successful_tasks += 1
+                
+         
+                task.wait_for_done(sleep_interval=5, callback=on_task_update)
+                
+                if task.status == "ready":
+                    print(f"The unique identifier of your video is {task.video_id}")
+                else:
+                    print(f"Task failed with status: {task.status}")
+                
+            except Exception as e:
+                print(f"Error during indexing: {str(e)}")
+            finally:
+                queue.task_done()
+        
+     
+        return successful_tasks
+        
+    except Exception as e:
+        print(f"Error in indexing queue: {str(e)}")
+        return 0
 
 def video_urls_section():
+
     st.header("Video URLs")
-
-    index_name = st.text_input("Enter Index Name:", key="index_name")
-
-    if st.button("Create Index") and index_name and not st.session_state.index:
-        with st.spinner("Creating index..."):
-            client = TwelveLabs(api_key=API_KEY)
-            
-            models = [
-                {
-                    "name": "marengo2.7",
-                    "options": ["visual", "audio"]
-                }
-            ]
-            
-            try:
-                index = client.index.create(
-                    name=index_name,
-                    models=models,
-                    addons=["thumbnail"]
-                )
-                st.session_state.index = index
-                st.success(f"Index created successfully! ID: {index.id}")
-            except Exception as e:
-                st.error(f"Failed to create index: {str(e)}")
-                return
     
-    if not st.session_state.index:
-        st.warning("Please create an index first!")
-        return
- 
     urls = []
     for i in range(5):
         url = st.text_input(f"Video URL #{i+1}:", key=f"url_{i}")
         urls.append(url)
 
     if st.button("Download and Index"):
+        if not st.session_state.api_key:
+            st.error("⚠️ API key not found. Please complete the setup first.")
+            return
+            
+        if not st.session_state.index:
+            st.error("⚠️ Index not found. Please complete the setup first.")
+            return
+            
         valid_urls = [url for url in urls if url]
         if not valid_urls:
             st.warning("Please enter at least one URL!")
             return
-            
-        st.session_state.total_videos = len(valid_urls)
-        st.session_state.indexed_count = 0
+        
+        api_key = st.session_state.api_key
+        index_id = st.session_state.index.id
+        
+        total_videos = len(valid_urls)
         downloads_dir = get_downloads_folder()
         st.info(f"📂 Videos will be saved to {downloads_dir}")
         
         status_container = st.container()
+        downloaded_files = []
         
-        index_queue = Queue()
-        indexing_thread = threading.Thread(
-            target=process_indexing_queue,
-            args=(index_queue, st.session_state.index.id, status_container)
-        )
-        indexing_thread.start()
-        
-        with st.spinner("Processing videos..."):
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                future_to_url = {
-                    executor.submit(download_video, url): (i, url)
-                    for i, url in enumerate(valid_urls)
-                }
-                
-                for future in concurrent.futures.as_completed(future_to_url):
-                    i, url = future_to_url[future]
-                    try:
-                        filename, title_or_error = future.result()
-                        if filename and os.path.exists(filename):
-                            st.success(f"✅ Downloaded: {title_or_error}")
-                            index_queue.put(filename)
-                        elif url:
-                            st.error(f"❌ Error downloading video #{i+1}: {title_or_error}")
-                    except Exception as e:
-                        st.error(f"❌ Error processing video #{i+1}: {str(e)}")
+        try:
+            with st.spinner("Processing videos..."):
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = []
+                    for i, url in enumerate(valid_urls):
+                        future = executor.submit(download_video, url)
+                        futures.append((future, i, url))
+                    
+                    for future, i, url in futures:
+                        try:
+                            filename, title_or_error = future.result()
+                            if filename and os.path.exists(filename):
+                                st.success(f"✅ Downloaded: {title_or_error}")
+                                downloaded_files.append((filename, title_or_error))
+                            else:
+                                st.error(f"❌ Error downloading video #{i+1}: {title_or_error}")
+                        except Exception as e:
+                            st.error(f"❌ Error processing video #{i+1}: {str(e)}")
 
-        index_queue.put(None)
-        indexing_thread.join()
-        
-        if st.session_state.indexed_count > 0:
-            st.success(f"✅ Successfully indexed {st.session_state.indexed_count} videos")
-        else:
-            st.error("❌ No videos were successfully indexed")
+                if downloaded_files:
+                    st.info("🔄 Starting indexing process...")
+                    successful_indexes = 0
+                    
+                    for filename, title in downloaded_files:
+                        try:
+                            with status_container:
+                                client = TwelveLabs(api_key=api_key)
+                                st.info(f"🔍 Indexing: {title}")
+                                progress_bar = st.progress(0)
+                                
+                                task = client.task.create(
+                                    index_id=index_id,
+                                    file=filename
+                                )
+                                
+                                start_time = time.time()
+                                
+                                def on_task_update(task: Task):
+                                    elapsed_time = int(time.time() - start_time)
+                                    if task.status == "processing":
+                                        progress = min(0.95, elapsed_time / 180)
+                                        progress_bar.progress(progress)
+                                
+                                task.wait_for_done(sleep_interval=5, callback=on_task_update)
+                                
+                                if task.status == "ready":
+                                    progress_bar.progress(1.0)
+                                    st.success(f"""
+                                    ✅ Successfully indexed: {title}
+                                    🎯 Video ID: {task.video_id}
+                                    ⌛ Total time: {int(time.time() - start_time)} seconds
+                                    """)
+                                    successful_indexes += 1
+                                else:
+                                    st.error(f"❌ Indexing failed for {title} with status: {task.status}")
+                                    
+                        except Exception as e:
+                            st.error(f"❌ Indexing error for {title}: {str(e)}")
+                    
+                    if successful_indexes > 0:
+                        st.success(f"✅ Successfully indexed {successful_indexes} out of {len(downloaded_files)} videos")
+                    else:
+                        st.error("❌ No videos were successfully indexed")
+                else:
+                    st.error("❌ No videos were successfully downloaded")
+                    
+        except Exception as e:
+            st.error(f"❌ Error during processing: {str(e)}")
 
 def get_channel_videos(channel_url, option):
  
@@ -465,22 +499,18 @@ def get_popular_videos(channel_id, limit=10):
         return False, f"Error fetching popular videos: {str(e)}"
 
 def process_videos(video_info, download_status, indexing_status):
-
     try:
-        client = TwelveLabs(api_key=API_KEY)
+        client = TwelveLabs(api_key=st.session_state.api_key)
         video_urls = [info['url'] for info in video_info]
         st.session_state.total_videos = len(video_urls)
         st.session_state.indexed_count = 0
         downloads_dir = get_downloads_folder()
         st.info(f"📂 Videos will be saved to: {downloads_dir}")
 
-   
         downloaded_files = {}
-
         status_containers = {}
         for i in range(len(video_info)):
             status_containers[i] = st.container()
-
 
         with ThreadPoolExecutor(max_workers=5) as executor:
             future_to_video = {
@@ -516,7 +546,7 @@ def process_videos(video_info, download_status, indexing_status):
                     progress_bar = st.progress(0)
                     
                     task = client.task.create(
-                        index_id=st.session_state.index.id,
+                        index_id=st.session_state.index.id, 
                         file=filename
                     )
                     
@@ -560,7 +590,6 @@ def process_videos(video_info, download_status, indexing_status):
     except Exception as e:
         st.error(f"❌ Error during processing: {str(e)}")
         return False
-
 def channel_videos_section():
     st.header("Channel Videos")
     
@@ -585,7 +614,7 @@ def channel_videos_section():
             "5_newest": "5 Newest Videos",
             "10_newest": "10 Newest Videos",
             "10_oldest": "10 Oldest Videos",
-            "10_popular": "10 Most Popular Videos"
+            "10_popular": "10 Most Viewed Videos"
         }[x]
     )
     
@@ -631,9 +660,72 @@ def channel_videos_section():
                     )
 
 
-def main():
-    st.title("YouTube Video Processor and Indexing")
 
+def initial_setup():
+
+    st.title("Index UGC with Twelve Labs")
+    
+    api_key = st.text_input(
+        "Enter your Twelve Labs API Key:",
+        value="", 
+        type="password",
+        help="Your API key from the Twelve Labs dashboard"
+    )
+    
+    index_name = st.text_input(
+        "Enter Index Name:",
+        help="Choose a unique name for your video index"
+    )
+    
+    if st.button("Initialize Application"):
+        if not api_key:
+            st.error("⚠️ Please enter your API key")
+            return
+        if not index_name:
+            st.error("⚠️ Please enter an index name")
+            return
+            
+        try:
+            with st.spinner("Setting up your index..."):
+            
+                client = TwelveLabs(api_key=api_key)
+                
+                models = [{
+                    "name": "marengo2.7",
+                    "options": ["visual", "audio"]
+                }]
+                
+                index = client.index.create(
+                    name=index_name,
+                    models=models,
+                    addons=["thumbnail"]
+                )
+                
+                st.session_state.api_key = api_key
+                st.session_state.index = index
+                st.session_state.setup_complete = True
+                
+                st.success("✅ Setup completed successfully!")
+                time.sleep(1)
+                st.rerun()
+                
+        except Exception as e:
+            st.error(f"❌ Setup failed: {str(e)}")
+
+def main():
+    if not st.session_state.setup_complete or not st.session_state.index:
+        initial_setup()
+        return
+    
+    st.title("Index UGC with Twelve Labs")
+    
+    with st.sidebar:
+        st.success(f"✅ Active Index: {st.session_state.index.name}")
+        if st.button("Create New Index"):
+            st.session_state.setup_complete = False
+            st.session_state.index = None
+            st.rerun()
+    
     tab1, tab2 = st.tabs(["Video URLs", "Channel Videos"])
     
     with tab1:
