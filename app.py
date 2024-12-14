@@ -1,5 +1,6 @@
 import streamlit as st
 import yt_dlp
+from pytube import YouTube
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +15,12 @@ from datetime import datetime, timezone
 from datetime import datetime
 import isodate
 import re
-import requests
+
+
+
+import youtube_dl
+
+
 
 from dotenv import load_dotenv
 
@@ -29,8 +35,6 @@ if 'api_key' not in st.session_state:
 
 if 'index' not in st.session_state:
     st.session_state.index = None
-
-
 if 'current_indexing' not in st.session_state:
     st.session_state.current_indexing = None
 if 'indexed_count' not in st.session_state:
@@ -82,8 +86,9 @@ def index_video(file_path, index_id, client, status_placeholder):
         return True, task.video_id
     except Exception as e:
         return False, str(e)
-def download_video(url):
+    
 
+def download_video(url):
     if not url:
         return None, None
     
@@ -92,18 +97,39 @@ def download_video(url):
     
     try:
         ydl_opts = {
-            'format': 'best[ext=mp4]/best',
+            'format': 'mp4',  # Simple format selection
             'outtmpl': os.path.join(downloads_dir, '%(title)s.%(ext)s'),
-            'quiet': True
+            'quiet': True,
+            'no_warnings': True,
+            'ignoreerrors': True
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            return filename, info.get('title', '')
+            try:
+                meta = ydl.extract_info(url, download=False)
+                if meta:
+                    download_url = meta.get('url')
+                    if download_url:
+                        info = ydl.extract_info(url, download=True)
+                        if info:
+                            filename = ydl.prepare_filename(info)
+                            if os.path.exists(filename):
+                                return filename, info.get('title', '')
+                
+
+                ydl_opts['format'] = 'best'
+                info = ydl.extract_info(url, download=True)
+                if info:
+                    filename = ydl.prepare_filename(info)
+                    if os.path.exists(filename):
+                        return filename, info.get('title', '')
+                
+            except Exception as e:
+                print(f"Error during download: {str(e)}")
+                
+            return None, "Could not download video"
     except Exception as e:
         return None, str(e)
-    
 
 
 # def _get_api_key():
@@ -257,15 +283,19 @@ def video_urls_section():
         except Exception as e:
             st.error(f"❌ Error during processing: {str(e)}")
 
-def get_channel_videos(channel_url, option, video_count):
+def get_channel_videos(channel_url, option):
+ 
     try:
-        if option == "most_recent":
+  
+        if option in ["5_newest", "10_newest"]:
+            limit = 5 if option == "5_newest" else 10
+
             ydl_opts = {
                 'extract_flat': 'in_playlist',
                 'quiet': True,
                 'no_warnings': True,
-                'playlistend': video_count * 2,  # Fetch extra to account for potential errors
-                'playlist_items': f'1:{video_count * 2}',
+                'playlistend': limit * 2,
+                'playlist_items': f'1:{limit * 2}',
                 'ignoreerrors': True,
                 'extractor_args': {
                     'youtube': {
@@ -290,7 +320,7 @@ def get_channel_videos(channel_url, option, video_count):
                 if not videos:
                     return False, "No videos found in channel"
 
-                videos = videos[:video_count]
+                videos = videos[:limit]
 
                 video_info = []
                 for video in videos:
@@ -314,48 +344,13 @@ def get_channel_videos(channel_url, option, video_count):
             if not channel_id:
                 return False, "Could not extract channel ID"
             
-            if option == "oldest":
-                return get_old_videos(channel_id, video_count)
-            elif option == "most_viewed":
-                return get_popular_videos(channel_id, video_count)
+            if option == "10_oldest":
+                return get_old_videos(channel_id, 10)
+            elif option == "10_popular":
+                return get_popular_videos(channel_id, 10)
 
     except Exception as e:
         return False, f"Error: {str(e)}"
-    
-
-def fetch_existing_indexes(api_key):
-
-    url = "https://api.twelvelabs.io/v1.3/indexes"
-    headers = {
-        "accept": "application/json",
-        "x-api-key": api_key,
-        "Content-Type": "application/json"
-    }
-    
-    try:
-        response = requests.get(
-            url,
-            headers=headers,
-            params={"page": 1, "page_limit": 50, "sort_by": "created_at", "sort_option": "desc"}
-        )
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        st.error(f"Error fetching indexes: {str(e)}")
-        return None
-
-def format_index_info(index):
-
-    models = [model["model_name"] for model in index["models"]]
-    expires = datetime.strptime(index["expires_at"], "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%Y-%m-%d")
-    
-    return {
-        "id": index["_id"],
-        "name": index["index_name"],
-        "video_count": index["video_count"],
-        "models": ", ".join(models),
-        "expires": expires
-    }
 
 def get_channel_id_from_url(channel_url):
 
@@ -624,9 +619,6 @@ def process_videos(video_info, download_status, indexing_status):
     except Exception as e:
         st.error(f"❌ Error during processing: {str(e)}")
         return False
-    
-
-
 def channel_videos_section():
     st.header("Channel Videos")
     
@@ -639,25 +631,19 @@ def channel_videos_section():
         placeholder="https://www.youtube.com/channel/... or https://www.youtube.com/@..."
     )
     
-    video_count = st.slider(
-        "Number of videos to process:",
-        min_value=1,
-        max_value=100,
-        value=10,
-        help="Select how many videos you want to process"
-    )
-    
     option = st.selectbox(
         "Select videos to process:",
         [
-            "most_recent",
-            "most_viewed",
-            "oldest"
+            "5_newest",
+            "10_newest",
+            "10_oldest",
+            "10_popular"
         ],
         format_func=lambda x: {
-            "most_recent": "Most Recent Videos",
-            "most_viewed": "Most Viewed Videos",
-            "oldest": "Oldest Videos"
+            "5_newest": "5 Newest Videos",
+            "10_newest": "10 Newest Videos",
+            "10_oldest": "10 Oldest Videos",
+            "10_popular": "10 Most Viewed Videos"
         }[x]
     )
     
@@ -670,7 +656,7 @@ def channel_videos_section():
                 return
                 
             with st.spinner("Fetching channel videos..."):
-                success, result = get_channel_videos(channel_url, option, video_count)
+                success, result = get_channel_videos(channel_url, option)
                 
                 if success:
                     st.session_state.fetched_videos = result
@@ -687,8 +673,7 @@ def channel_videos_section():
                 st.markdown(f"""
                 **{i}. {info['title']}**
                 - URL: {info['url']}
-                - Views: {info.get('views', 'N/A')}
-                {f"- Published: {info.get('published', 'N/A')}" if 'published' in info else ''}
+                - Views: {info['views']}
                 """)
         
         with col2:
@@ -704,6 +689,7 @@ def channel_videos_section():
                     )
 
 
+
 def initial_setup():
     st.title("Index UGC with Twelve Labs")
     
@@ -713,118 +699,62 @@ def initial_setup():
         type="password",
         help="Your API key from the Twelve Labs dashboard"
     )
-
-    if not api_key:
-        st.warning("Please enter your API key to proceed")
-        return
-
-    existing_indexes = None
-    if api_key:
-        with st.spinner("Fetching existing indexes..."):
-            existing_indexes = fetch_existing_indexes(api_key)
-
-    index_option = st.radio(
-        "Choose an option:",
-        ["Create New Index", "Use Existing Index"],
-        help="Create a new index or select from your existing ones"
+    
+    index_name = st.text_input(
+        "Enter Index Name:",
+        help="Choose a unique name for your video index"
     )
 
-    if index_option == "Create New Index":
-        st.subheader("Create New Index")
-        
-        index_name = st.text_input(
-            "Enter Index Name:",
-            help="Choose a unique name for your video index"
-        )
+    st.subheader("Model Selection")
+    st.info("Marengo 2.7 as the default model for all indexes.")
 
-        st.info("Marengo 2.7 as the default model for all indexes.")
-        use_pegasus = st.checkbox("Add Pegasus 1.1 to enhance indexing capabilities")
-        
-        if st.button("Create New Index"):
-            if not index_name:
-                st.error("⚠️ Please enter an index name")
-                return
-                
-            try:
-                with st.spinner("Creating new index..."):
-                    client = TwelveLabs(api_key=api_key)
-                    
-                    models = [
-                        {
-                            "name": "marengo2.7",
-                            "options": ["visual", "audio"]
-                        }
-                    ]
-                    
-                    if use_pegasus:
-                        models.insert(0, {
-                            "name": "pegasus1.1",
-                            "options": ["visual", "audio"]
-                        })
-                    
-                    index = client.index.create(
-                        name=index_name,
-                        models=models,
-                        addons=["thumbnail"]
-                    )
-                    
-                    st.session_state.api_key = api_key
-                    st.session_state.index = index
-                    st.session_state.setup_complete = True
-                    
-                    model_names = [model["name"] for model in models]
-                    st.success(f"""
-                    ✅ New index created successfully!
-                    📊 Active Models: {", ".join(model_names)}
-                    """)
-                    time.sleep(1)
-                    st.rerun()
-                    
-            except Exception as e:
-                st.error(f"❌ Index creation failed: {str(e)}")
-
-    else: 
-        st.subheader("Select Existing Index")
-        
-        if existing_indexes and "data" in existing_indexes:
-            index_options = {
-                f"{index['index_name']} (Videos: {index['video_count']})": format_index_info(index)
-                for index in existing_indexes["data"]
-            }
+    use_pegasus = st.checkbox("Add Pegasus 1.1 to enhance indexing capabilities")
+    
+    if st.button("Initialize Application"):
+        if not api_key:
+            st.error("⚠️ Please enter your API key")
+            return
+        if not index_name:
+            st.error("⚠️ Please enter an index name")
+            return
             
-            selected_index = st.selectbox(
-                "Choose an index:",
-                options=list(index_options.keys()),
-                format_func=lambda x: x
-            )
-            
-            if selected_index:
-                index_info = index_options[selected_index]
+        try:
+            with st.spinner("Setting up your index..."):
+                client = TwelveLabs(api_key=api_key)
                 
-                st.info(f"""
-                **Selected Index Details:**
-                - Name: {index_info['name']}
-                - Videos: {index_info['video_count']}
-                - Models: {index_info['models']}
-                - Expires: {index_info['expires']}
+                models = [
+                    {
+                        "name": "marengo2.7",
+                        "options": ["visual", "audio"]
+                    }
+                ]
+                
+                if use_pegasus:
+                    models.insert(0, {
+                        "name": "pegasus1.1",
+                        "options": ["visual", "audio"]
+                    })
+                
+                index = client.index.create(
+                    name=index_name,
+                    models=models,
+                    addons=["thumbnail"]
+                )
+                
+                st.session_state.api_key = api_key
+                st.session_state.index = index
+                st.session_state.setup_complete = True
+                
+                model_names = [model["name"] for model in models]
+                st.success(f"""
+                ✅ Setup completed successfully!
+                📊 Active Models: {", ".join(model_names)}
                 """)
+                time.sleep(1)
+                st.rerun()
                 
-                if st.button("Use Selected Index"):
-                    try:
-                        client = TwelveLabs(api_key=api_key)
-                        
-                        st.session_state.api_key = api_key
-                        st.session_state.index = index_info['id']
-                        st.session_state.setup_complete = True
-                        
-                        st.success(f"✅ Successfully connected to index: {index_info['name']}")
-                        time.sleep(1)
-                        st.rerun()
-                        
-                    except Exception as e:
-                        st.error(f"❌ Error connecting to index: {str(e)}")
-        else:
-            st.warning("No existing indexes found or error fetching indexes")
+        except Exception as e:
+            st.error(f"❌ Setup failed: {str(e)}")
 
 def main():
     if not st.session_state.setup_complete or not st.session_state.index:
@@ -834,8 +764,8 @@ def main():
     st.title("Index UGC with Twelve Labs")
     
     with st.sidebar:
-        st.success(f"✅ Active Index: {st.session_state.index}")
-        if st.button("Switch Index"):
+        st.success(f"✅ Active Index: {st.session_state.index.name}")
+        if st.button("Create New Index"):
             st.session_state.setup_complete = False
             st.session_state.index = None
             st.rerun()
