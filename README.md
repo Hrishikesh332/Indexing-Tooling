@@ -1,4 +1,3 @@
-# Indexing-Tooling
 
 ## Workflow Indexing Tooling
 
