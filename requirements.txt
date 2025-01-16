@@ -5,3 +5,4 @@ requests
 yt-dlp
 google-api-python-client
 isodate
+pytube
