@@ -541,13 +541,75 @@ def process_videos(video_info, download_status, indexing_status):
         # Create status placeholder for each video
         status_containers = {i: st.empty() for i in range(len(video_info))}
         
-        # Shared state for tracking progress
-        if 'download_complete' not in st.session_state:
-            st.session_state.download_complete = False
-        if 'indexing_tasks' not in st.session_state:
-            st.session_state.indexing_tasks = []
-        if 'indexed_files' not in st.session_state:
-            st.session_state.indexed_files = []
+        # Create a queue for indexing tasks
+        indexing_queue = Queue()
+        indexed_results = {}
+        
+        # Start indexing worker thread
+        def indexing_worker():
+            while True:
+                try:
+                    i, filename, title = indexing_queue.get(timeout=1)  # 1 second timeout
+                    if filename is None:  # Sentinel value
+                        break
+                        
+                    try:
+                        with status_containers[i]:
+                            st.info(f"🔍 Starting indexing for: {title}")
+                            progress_bar = st.progress(0)
+                            
+                            start_time = time.time()
+                            
+                            task = client.task.create(
+                                index_id=st.session_state.index.id,
+                                file=filename
+                            )
+                            
+                            def update_progress():
+                                while task.status not in ["ready", "failed", "error"]:
+                                    elapsed_time = int(time.time() - start_time)
+                                    if task.status == "processing":
+                                        progress = min(0.95, elapsed_time / 180)
+                                        progress_bar.progress(progress)
+                                        st.info(f"""
+                                        🎥 Currently indexing: {title}
+                                        ⏳ Status: {task.status}
+                                        ⌛ Time elapsed: {elapsed_time} seconds
+                                        """)
+                                    time.sleep(5)
+                                    task.refresh()
+                                
+                                if task.status == "ready":
+                                    progress_bar.progress(1.0)
+                                    st.success(f"""
+                                    ✅ Successfully indexed: {title}
+                                    🎯 Video ID: {task.video_id}
+                                    ⌛ Total time: {int(time.time() - start_time)} seconds
+                                    """)
+                                    indexed_results[i] = True
+                                else:
+                                    st.error(f"❌ Indexing failed for {title} with status: {task.status}")
+                                    indexed_results[i] = False
+                            
+                            # Start progress update in separate thread
+                            threading.Thread(target=update_progress, daemon=True).start()
+                            
+                    except Exception as e:
+                        st.error(f"❌ Indexing error for {title}: {str(e)}")
+                        indexed_results[i] = False
+                    
+                    finally:
+                        indexing_queue.task_done()
+                        
+                except Empty:
+                    continue  # Keep checking for new items
+                except Exception as e:
+                    print(f"Error in indexing worker: {str(e)}")
+                    break
+        
+        # Start indexing worker thread
+        indexing_thread = threading.Thread(target=indexing_worker, daemon=True)
+        indexing_thread.start()
         
         # Process downloads first
         downloaded_files = []
@@ -568,68 +630,26 @@ def process_videos(video_info, download_status, indexing_status):
                         📁 File: {title}
                         """)
                         downloaded_files.append((i, filename, title))
+                        # Add to indexing queue immediately after download
+                        indexing_queue.put((i, filename, title))
                     else:
                         status_containers[i].error(f"❌ Video #{i + 1}: Download failed - {title}")
                 except Exception as e:
                     status_containers[i].error(f"❌ Video #{i + 1}: Download error - {str(e)}")
-
-        # Now process indexing for downloaded files
-        successful_indexes = 0
-        indexing_errors = []
-
-        for i, filename, title in downloaded_files:
-            try:
-                with status_containers[i]:
-                    st.info(f"🔍 Starting indexing for: {title}")
-                    progress_bar = st.progress(0)
-                    
-                    start_time = time.time()
-                    
-                    task = client.task.create(
-                        index_id=st.session_state.index.id,
-                        file=filename
-                    )
-                    
-                    while task.status not in ["ready", "failed", "error"]:
-                        elapsed_time = int(time.time() - start_time)
-                        if task.status == "processing":
-                            progress = min(0.95, elapsed_time / 180)
-                            progress_bar.progress(progress)
-                            st.info(f"""
-                            🎥 Currently indexing: {title}
-                            ⏳ Status: {task.status}
-                            ⌛ Time elapsed: {elapsed_time} seconds
-                            """)
-                        # task.refresh()
-                        time.sleep(5)
-                    
-                    if task.status == "ready":
-                        progress_bar.progress(1.0)
-                        st.success(f"""
-                        ✅ Successfully indexed: {title}
-                        🎯 Video ID: {task.video_id}
-                        ⌛ Total time: {int(time.time() - start_time)} seconds
-                        """)
-                        successful_indexes += 1
-                    else:
-                        st.error(f"❌ Indexing failed for {title} with status: {task.status}")
-                        indexing_errors.append((title, f"Failed with status: {task.status}"))
-                        
-            except Exception as e:
-                st.error(f"❌ Indexing error for {title}: {str(e)}")
-                indexing_errors.append((title, str(e)))
-
+        
+        # Add sentinel value to stop the indexing worker
+        indexing_queue.put((None, None, None))
+        
+        # Wait for indexing to complete
+        indexing_thread.join()
+        
         # Final status update
+        successful_indexes = sum(1 for success in indexed_results.values() if success)
         st.success(f"""
         ✅ Processing completed!
         📊 Total videos indexed: {successful_indexes}/{len(downloaded_files)}
         📁 Videos saved in: {downloads_dir}
         """)
-
-        if indexing_errors:
-            st.error("Some videos failed to index:")
-            for title, error in indexing_errors:
-                st.error(f"❌ {title}: {error}")
 
         return True
 
