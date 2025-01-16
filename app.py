@@ -538,18 +538,7 @@ def process_videos(video_info, download_status, indexing_status):
         downloads_dir = get_downloads_folder()
         st.info(f"📂 Videos will be saved to: {downloads_dir}")
 
-        # Create status placeholder for each video
-        status_containers = {i: st.empty() for i in range(len(video_info))}
-        
-        # Shared state for tracking progress
-        if 'download_complete' not in st.session_state:
-            st.session_state.download_complete = False
-        if 'indexing_tasks' not in st.session_state:
-            st.session_state.indexing_tasks = []
-        if 'indexed_files' not in st.session_state:
-            st.session_state.indexed_files = []
-        
-        # Process downloads first
+        # Download videos first with simple threading
         downloaded_files = []
         with ThreadPoolExecutor(max_workers=3) as executor:
             future_to_url = {}
@@ -563,78 +552,35 @@ def process_videos(video_info, download_status, indexing_status):
                 try:
                     filename, title = future.result()
                     if filename and os.path.exists(filename):
-                        status_containers[i].success(f"""
-                        ✅ Video #{i + 1}: Downloaded
-                        📁 File: {title}
-                        """)
-                        downloaded_files.append((i, filename, title))
+                        st.success(f"✅ Downloaded: {title}")
+                        downloaded_files.append((filename, title))
                     else:
-                        status_containers[i].error(f"❌ Video #{i + 1}: Download failed - {title}")
+                        st.error(f"Download failed: {title}")
                 except Exception as e:
-                    status_containers[i].error(f"❌ Video #{i + 1}: Download error - {str(e)}")
+                    st.error(f"Download error: {str(e)}")
 
-        # Now process indexing for downloaded files
         successful_indexes = 0
-        indexing_errors = []
-
-        for i, filename, title in downloaded_files:
+        for filename, title in downloaded_files:
             try:
-                with status_containers[i]:
-                    st.info(f"🔍 Starting indexing for: {title}")
-                    progress_bar = st.progress(0)
+                task = client.task.create(
+                    index_id=st.session_state.index.id,
+                    file=filename
+                )
+                
+                if task.status == "ready":
+                    successful_indexes += 1
+                    st.success(f"✅ Indexed: {title}")
+                else:
+                    st.error(f"Failed to index: {title}")
                     
-                    start_time = time.time()
-                    
-                    task = client.task.create(
-                        index_id=st.session_state.index.id,
-                        file=filename
-                    )
-                    
-                    while task.status not in ["ready", "failed", "error"]:
-                        elapsed_time = int(time.time() - start_time)
-                        if task.status == "processing":
-                            progress = min(0.95, elapsed_time / 180)
-                            progress_bar.progress(progress)
-                            st.info(f"""
-                            🎥 Currently indexing: {title}
-                            ⏳ Status: {task.status}
-                            ⌛ Time elapsed: {elapsed_time} seconds
-                            """)
-                        # task.refresh()
-                        time.sleep(5)
-                    
-                    if task.status == "ready":
-                        progress_bar.progress(1.0)
-                        st.success(f"""
-                        ✅ Successfully indexed: {title}
-                        🎯 Video ID: {task.video_id}
-                        ⌛ Total time: {int(time.time() - start_time)} seconds
-                        """)
-                        successful_indexes += 1
-                    else:
-                        st.error(f"❌ Indexing failed for {title} with status: {task.status}")
-                        indexing_errors.append((title, f"Failed with status: {task.status}"))
-                        
             except Exception as e:
-                st.error(f"❌ Indexing error for {title}: {str(e)}")
-                indexing_errors.append((title, str(e)))
+                st.error(f"Indexing error for {title}: {str(e)}")
 
-        # Final status update
-        st.success(f"""
-        ✅ Processing completed!
-        📊 Total videos indexed: {successful_indexes}/{len(downloaded_files)}
-        📁 Videos saved in: {downloads_dir}
-        """)
-
-        if indexing_errors:
-            st.error("Some videos failed to index:")
-            for title, error in indexing_errors:
-                st.error(f"❌ {title}: {error}")
-
+        st.success(f"✅ Complete: {successful_indexes}/{len(downloaded_files)} videos indexed")
         return True
 
     except Exception as e:
-        st.error(f"❌ Error during processing: {str(e)}")
+        st.error(f"Error: {str(e)}")
         return False
 
 def channel_videos_section():
