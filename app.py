@@ -672,7 +672,7 @@ def initial_setup():
     st.subheader("Model Selection")
     st.info("Marengo 2.7 as the default model for all indexes.")
 
-    use_pegasus = st.checkbox("Add Pegasus 1.1 to enhance indexing capabilities")
+    use_pegasus = st.checkbox("Add Pegasus 1.2 to enhance indexing capabilities")
     
     if st.button("Initialize Application"):
         if not api_key:
@@ -695,7 +695,7 @@ def initial_setup():
                 
                 if use_pegasus:
                     models.insert(0, {
-                        "name": "pegasus1.1",
+                        "name": "pegasus1.2",
                         "options": ["visual", "audio"]
                     })
                 
