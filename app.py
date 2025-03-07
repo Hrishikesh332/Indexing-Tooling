@@ -53,12 +53,24 @@ if 'fetched_videos' not in st.session_state:
 if 'fetch_status' not in st.session_state:
     st.session_state.fetch_status = None
 
+
+def delete_file(file_path):
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            return True
+    except Exception as e:
+        print(f"Error deleting file {file_path}: {str(e)}")
+    return False
+
+
+
+
 def get_downloads_folder():
     return str(Path.home() / "Downloads" / "YouTubeDownloads")
 
 def index_video(file_path, index_id, client, status_placeholder):
     try:
-
         st.session_state.current_indexing = os.path.basename(file_path)
         status_placeholder.info(f"🎥 Currently indexing {st.session_state.current_indexing}")
         
@@ -84,14 +96,15 @@ def index_video(file_path, index_id, client, status_placeholder):
         task.wait_for_done(sleep_interval=5, callback=on_task_update)
         progress_bar.progress(1.0)
 
-        if task.status != "ready":
+        if task.status == "ready":
+            delete_file(file_path)
+            st.session_state.indexed_count += 1
+            return True, task.video_id
+        else:
             return False, f"Indexing failed with status {task.status}"
             
-        st.session_state.indexed_count += 1
-        return True, task.video_id
     except Exception as e:
         return False, str(e)
-    
 
 def download_video(url):
     if not url:
@@ -165,6 +178,7 @@ def process_indexing_queue(queue, index_id, status_placeholder, api_key):
                     if task.status == "ready":
                         nonlocal successful_tasks
                         successful_tasks += 1
+                        delete_file(file_path)
                 
          
                 task.wait_for_done(sleep_interval=5, callback=on_task_update)
@@ -272,6 +286,7 @@ def video_urls_section():
                                     ⌛ Total time: {int(time.time() - start_time)} seconds
                                     """)
                                     successful_indexes += 1
+                                    delete_file(filename)
                                 else:
                                     st.error(f"❌ Indexing failed for {title} with status: {task.status}")
                                     
@@ -570,6 +585,8 @@ def process_videos(video_info, download_status, indexing_status):
                 if task.status == "ready":
                     successful_indexes += 1
                     st.success(f"✅ Indexed: {title}")
+                    delete_file(filename)
+                    
                 else:
                     st.error(f"Failed to index: {title}")
                     
