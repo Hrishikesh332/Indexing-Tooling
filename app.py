@@ -218,7 +218,6 @@ def video_urls_section():
         url = st.text_input(f"Video URL #{i+1}:", key=f"url_{i}")
         urls.append(url)
 
-    # Display a note about video chunking if Pegasus is enabled
     if st.session_state.need_chunking_for_pegasus:
         st.info("ℹ️ Pegasus model is active. Videos longer than 59 minutes will be automatically chunked.")
 
@@ -279,16 +278,14 @@ def video_urls_section():
                                 needs_chunking = st.session_state.need_chunking_for_pegasus
                                 
                                 if needs_chunking:
-                                    # Check video duration
                                     duration = get_video_duration(filename)
-                                    if duration and duration > (59*60):  # 59 minutes in seconds
+                                    if duration and duration > (59*60):
                                         st.info(f"📏 Video length: {duration/60:.1f} minutes. Video will be chunked.")
                                     else:
                                         st.info(f"📏 Video length: {duration/60:.1f} minutes. No chunking needed.")
                                 
                                 progress_bar = st.progress(0)
                                 
-                                # Use the enhanced function that supports chunking
                                 success, result = index_video_with_chunking(
                                     file_path=filename,
                                     index_id=index_id,
