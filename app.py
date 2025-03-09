@@ -25,6 +25,14 @@ from pathlib import Path
 
 import youtube_dl
 
+import os
+import yt_dlp
+from moviepy.editor import VideoFileClip
+from pathlib import Path
+import math
+import time
+import shutil
+import tempfile
 
 
 from dotenv import load_dotenv
@@ -63,7 +71,8 @@ def delete_file(file_path):
         print(f"Error deleting file {file_path}: {str(e)}")
     return False
 
-
+if 'need_chunking_for_pegasus' not in st.session_state:
+    st.session_state.need_chunking_for_pegasus = False
 
 
 def get_downloads_folder():
@@ -200,14 +209,18 @@ def process_indexing_queue(queue, index_id, status_placeholder, api_key):
         print(f"Error in indexing queue: {str(e)}")
         return 0
 
-def video_urls_section():
 
+def video_urls_section():
     st.header("Video URLs")
     
     urls = []
     for i in range(5):
         url = st.text_input(f"Video URL #{i+1}:", key=f"url_{i}")
         urls.append(url)
+
+    # Display a note about video chunking if Pegasus is enabled
+    if st.session_state.need_chunking_for_pegasus:
+        st.info("ℹ️ Pegasus model is active. Videos longer than 59 minutes will be automatically chunked.")
 
     if st.button("Download and Index"):
         if not st.session_state.api_key:
@@ -261,34 +274,37 @@ def video_urls_section():
                             with status_container:
                                 client = TwelveLabs(api_key=api_key)
                                 st.info(f"🔍 Indexing: {title}")
+                                
+                                # Check if the video needs chunking for Pegasus
+                                needs_chunking = st.session_state.need_chunking_for_pegasus
+                                
+                                if needs_chunking:
+                                    # Check video duration
+                                    duration = get_video_duration(filename)
+                                    if duration and duration > (59*60):  # 59 minutes in seconds
+                                        st.info(f"📏 Video length: {duration/60:.1f} minutes. Video will be chunked.")
+                                    else:
+                                        st.info(f"📏 Video length: {duration/60:.1f} minutes. No chunking needed.")
+                                
                                 progress_bar = st.progress(0)
                                 
-                                task = client.task.create(
+                                # Use the enhanced function that supports chunking
+                                success, result = index_video_with_chunking(
+                                    file_path=filename,
                                     index_id=index_id,
-                                    file=filename
+                                    client=client,
+                                    status_placeholder=status_container,
+                                    needs_chunking=needs_chunking
                                 )
                                 
-                                start_time = time.time()
-                                
-                                def on_task_update(task: Task):
-                                    elapsed_time = int(time.time() - start_time)
-                                    if task.status == "processing":
-                                        progress = min(0.95, elapsed_time / 180)
-                                        progress_bar.progress(progress)
-                                
-                                task.wait_for_done(sleep_interval=5, callback=on_task_update)
-                                
-                                if task.status == "ready":
-                                    progress_bar.progress(1.0)
+                                if success:
                                     st.success(f"""
                                     ✅ Successfully indexed: {title}
-                                    🎯 Video ID: {task.video_id}
-                                    ⌛ Total time: {int(time.time() - start_time)} seconds
+                                    🎯 Result: {result}
                                     """)
                                     successful_indexes += 1
-                                    delete_file(filename)
                                 else:
-                                    st.error(f"❌ Indexing failed for {title} with status: {task.status}")
+                                    st.error(f"❌ Indexing failed for {title}: {result}")
                                     
                         except Exception as e:
                             st.error(f"❌ Indexing error for {title}: {str(e)}")
@@ -302,6 +318,8 @@ def video_urls_section():
                     
         except Exception as e:
             st.error(f"❌ Error during processing: {str(e)}")
+
+
 
 def get_channel_videos(channel_url, option):
  
@@ -547,13 +565,336 @@ def get_popular_videos(channel_id, limit=10):
         print(f"Error in get_popular_videos: {str(e)}")  
         return False, f"Error fetching popular videos: {str(e)}"
 
+
+
+
+def get_video_duration(file_path):
+
+    try:
+        clip = VideoFileClip(file_path)
+        duration = clip.duration
+        clip.close()
+        return duration
+    except Exception as e:
+        print(f"Error getting video duration: {str(e)}")
+        return None
+
+def chunk_video(input_path, output_dir, chunk_duration=59*60, status_placeholder=None):
+
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        
+        if status_placeholder:
+            status_placeholder.info("📊 Analyzing video file...")
+        
+        video = VideoFileClip(input_path)
+        total_duration = video.duration
+        video.close()
+        
+        num_chunks = math.ceil(total_duration / chunk_duration)
+        
+        if num_chunks <= 1:
+            if status_placeholder:
+                status_placeholder.success("✅ Video is already within time limit. No chunking needed.")
+            return [input_path]
+            
+        if status_placeholder:
+            status_placeholder.info(f"""
+            📋 Chunking Plan:
+            - Video Duration: {total_duration/60:.1f} minutes
+            - Chunk Duration: {chunk_duration/60:.1f} minutes
+            - Total Chunks: {num_chunks}
+            """)
+            
+            chunking_progress = status_placeholder.progress(0)
+            
+        chunk_files = []
+        base_name = os.path.splitext(os.path.basename(input_path))[0]
+        
+        for i in range(num_chunks):
+            start_time = i * chunk_duration
+            end_time = min((i + 1) * chunk_duration, total_duration)
+            
+            if status_placeholder:
+                status_placeholder.info(f"🔪 Creating chunk {i+1}/{num_chunks}: {start_time/60:.1f} - {end_time/60:.1f} minutes")
+            
+            chunk_path = os.path.join(output_dir, f"{base_name}_chunk_{i+1}.mp4")
+            
+            with VideoFileClip(input_path) as video:
+                new_clip = video.subclip(start_time, end_time)
+                new_clip.write_videofile(
+                    chunk_path, 
+                    codec="libx264",
+                    audio_codec="aac",
+                    temp_audiofile=os.path.join(tempfile.gettempdir(), f"temp_audio_{i}.m4a"),
+                    remove_temp=True,
+                    verbose=False,
+                    logger=None 
+                )
+            
+            chunk_files.append(chunk_path)
+            
+            if status_placeholder and 'chunking_progress' in locals():
+                overall_progress = (i + 1) / num_chunks
+                chunking_progress.progress(overall_progress)
+                status_placeholder.success(f"✅ Chunk {i+1}/{num_chunks} completed")
+            
+        if status_placeholder:
+            status_placeholder.success(f"✅ Video chunking complete! Created {len(chunk_files)} chunks.")
+            
+        return chunk_files
+        
+    except Exception as e:
+        if status_placeholder:
+            status_placeholder.error(f"❌ Error during chunking: {str(e)}")
+        print(f"Error chunking video: {str(e)}")
+        return []
+
+def process_video_for_pegasus(file_path, index_id, client, max_duration=59*60):
+
+    try:
+        duration = get_video_duration(file_path)
+        
+        if not duration:
+            return 0, 1, []
+            
+        if duration <= max_duration:
+            task = client.task.create(
+                index_id=index_id,
+                file=file_path,
+            )
+            
+            task.wait_for_done(sleep_interval=5)
+            
+            if task.status == "ready":
+                return 1, 0, [task.video_id]
+            else:
+                return 0, 1, []
+                
+        chunks_dir = os.path.join(os.path.dirname(file_path), "chunks")
+        chunk_paths = chunk_video(file_path, chunks_dir, max_duration)
+        
+        success_count = 0
+        failure_count = 0
+        video_ids = []
+        
+        for chunk_path in chunk_paths:
+            try:
+                task = client.task.create(
+                    index_id=index_id,
+                    file=chunk_path,
+                )
+                
+                task.wait_for_done(sleep_interval=5)
+                
+                if task.status == "ready":
+                    success_count += 1
+                    video_ids.append(task.video_id)
+                else:
+                    failure_count += 1
+                    
+                if os.path.exists(chunk_path):
+                    os.remove(chunk_path)
+                    
+            except Exception as e:
+                print(f"Error indexing chunk {chunk_path}: {str(e)}")
+                failure_count += 1
+                
+                if os.path.exists(chunk_path):
+                    os.remove(chunk_path)
+        
+        try:
+            if os.path.exists(chunks_dir):
+                shutil.rmtree(chunks_dir)
+        except:
+            pass
+            
+        return success_count, failure_count, video_ids
+        
+    except Exception as e:
+        print(f"Error in process_video_for_pegasus: {str(e)}")
+        return 0, 1, []
+
+
+
+
+def index_video_with_chunking(file_path, index_id, client, status_placeholder=None, needs_chunking=False):
+
+    try:
+        if status_placeholder:
+            st.session_state.current_indexing = os.path.basename(file_path)
+            status_placeholder.info(f"🎥 Currently processing: {st.session_state.current_indexing}")
+        
+        if not needs_chunking:
+            if status_placeholder:
+                status_placeholder.info("📤 Uploading video to Twelve Labs API...")
+                progress_bar = status_placeholder.progress(0)
+            
+            task = client.task.create(
+                index_id=index_id,
+                file=file_path,
+            )
+            
+            start_time = time.time()
+            
+            def on_task_update(task):
+                elapsed_time = int(time.time() - start_time)
+                if task.status == "processing" and status_placeholder:
+                    progress = min(0.95, elapsed_time / 180)
+                    if 'progress_bar' in locals():
+                        progress_bar.progress(progress)
+                if status_placeholder:
+                    status_placeholder.info(f"""
+                    🎥 Currently indexing: {st.session_state.current_indexing}
+                    ⏳ Status: {task.status}
+                    ⌛ Time elapsed: {elapsed_time} seconds
+                    """)
+
+            task.wait_for_done(sleep_interval=5, callback=on_task_update)
+            
+            if status_placeholder and 'progress_bar' in locals():
+                progress_bar.progress(1.0)
+
+            if task.status == "ready":
+                delete_file(file_path)
+                if 'indexed_count' in st.session_state:
+                    st.session_state.indexed_count += 1
+                return True, task.video_id
+            else:
+                return False, f"Indexing failed with status {task.status}"
+        else:
+            if status_placeholder:
+                status_placeholder.info(f"📏 Checking if video needs chunking...")
+            
+            duration = get_video_duration(file_path)
+            max_duration = 59 * 60
+            
+            if not duration:
+                return False, "Could not determine video duration"
+                
+            if duration <= max_duration:
+                if status_placeholder:
+                    status_placeholder.info(f"✅ Video is under 59 minutes, no chunking needed")
+                    
+                return index_video_with_chunking(file_path, index_id, client, status_placeholder, False)
+                
+            if status_placeholder:
+                status_placeholder.info(f"""
+                🔪 Video length ({duration/60:.1f} min) exceeds Pegasus limit (59 min)
+                🔄 Chunking video into smaller segments...
+                """)
+            
+            chunks_dir = os.path.join(os.path.dirname(file_path), "chunks")
+            
+            chunk_paths = chunk_video(file_path, chunks_dir, max_duration, status_placeholder)
+            
+            if not chunk_paths:
+                return False, "Failed to chunk video"
+                
+            if status_placeholder:
+                status_placeholder.info(f"📊 Chunking complete - Created {len(chunk_paths)} chunks")
+                master_progress = status_placeholder.progress(0)
+            
+            success_count = 0
+            failure_count = 0
+            video_ids = []
+            
+            for i, chunk_path in enumerate(chunk_paths):
+                if status_placeholder:
+                    status_placeholder.info(f"🎥 Indexing chunk {i+1}/{len(chunk_paths)}")
+                    chunk_progress = status_placeholder.progress(0)
+                
+                try:
+                    chunk_task = client.task.create(
+                        index_id=index_id,
+                        file=chunk_path,
+                    )
+                    
+                    chunk_start_time = time.time()
+                    
+                    def on_chunk_update(task):
+                        elapsed_time = int(time.time() - chunk_start_time)
+                        if task.status == "processing" and status_placeholder:
+                            progress = min(0.95, elapsed_time / 180)
+                            if 'chunk_progress' in locals():
+                                chunk_progress.progress(progress)
+                            if 'master_progress' in locals():
+                                master_value = (i + progress) / len(chunk_paths)
+                                master_progress.progress(master_value)
+                            status_placeholder.info(f"""
+                            🎥 Indexing chunk {i+1}/{len(chunk_paths)}
+                            ⏳ Status: {task.status}
+                            ⌛ Time elapsed: {elapsed_time} seconds
+                            """)
+                        elif task.status != "processing" and status_placeholder:
+                            status_placeholder.info(f"""
+                            🎥 Indexing chunk {i+1}/{len(chunk_paths)}
+                            ⏳ Status: {task.status}
+                            ⌛ Time elapsed: {elapsed_time} seconds
+                            """)
+                    
+                    chunk_task.wait_for_done(sleep_interval=5, callback=on_chunk_update)
+                    
+                    if status_placeholder and 'chunk_progress' in locals():
+                        chunk_progress.progress(1.0)
+                    
+                    if status_placeholder and 'master_progress' in locals():
+                        master_value = (i + 1) / len(chunk_paths)
+                        master_progress.progress(master_value)
+                    
+                    if chunk_task.status == "ready":
+                        success_count += 1
+                        video_ids.append(chunk_task.video_id)
+                        if status_placeholder:
+                            status_placeholder.success(f"✅ Successfully indexed chunk {i+1}/{len(chunk_paths)}")
+                    else:
+                        failure_count += 1
+                        if status_placeholder:
+                            status_placeholder.error(f"❌ Failed to index chunk {i+1}/{len(chunk_paths)}")
+                        
+                    if os.path.exists(chunk_path):
+                        os.remove(chunk_path)
+                        
+                except Exception as e:
+                    failure_count += 1
+                    if status_placeholder:
+                        status_placeholder.error(f"❌ Error indexing chunk {i+1}/{len(chunk_paths)}: {str(e)}")
+                    
+                    if os.path.exists(chunk_path):
+                        os.remove(chunk_path)
+            
+            try:
+                if os.path.exists(chunks_dir):
+                    shutil.rmtree(chunks_dir)
+            except:
+                pass
+                
+            delete_file(file_path)
+            
+            if 'indexed_count' in st.session_state:
+                st.session_state.indexed_count += success_count
+            
+            if success_count > 0:
+                if status_placeholder:
+                    status_placeholder.success(f"✅ Successfully indexed {success_count}/{len(chunk_paths)} chunks")
+                return True, f"Successfully indexed {success_count}/{len(chunk_paths)} video chunks"
+            else:
+                if status_placeholder:
+                    status_placeholder.error(f"❌ Failed to index any chunks")
+                return False, "Failed to index any video chunks"
+            
+    except Exception as e:
+        if status_placeholder:
+            status_placeholder.error(f"❌ Error: {str(e)}")
+        return False, str(e)
+
 def process_videos(video_info, download_status, indexing_status):
     try:
         client = TwelveLabs(api_key=st.session_state.api_key)
         downloads_dir = get_downloads_folder()
         st.info(f"📂 Videos will be saved to: {downloads_dir}")
 
-        # Download videos first with simple threading
+        # Downloading the videos first with simple threading
         downloaded_files = []
         with ThreadPoolExecutor(max_workers=3) as executor:
             future_to_url = {}
@@ -574,21 +915,25 @@ def process_videos(video_info, download_status, indexing_status):
                 except Exception as e:
                     st.error(f"Download error: {str(e)}")
 
+        # Check if chunking is needed for Pegasus
+        needs_chunking = st.session_state.need_chunking_for_pegasus
         successful_indexes = 0
+        
         for filename, title in downloaded_files:
             try:
-                task = client.task.create(
+                success, result = index_video_with_chunking(
+                    file_path=filename,
                     index_id=st.session_state.index.id,
-                    file=filename
+                    client=client,
+                    status_placeholder=indexing_status,
+                    needs_chunking=needs_chunking
                 )
                 
-                if task.status == "ready":
+                if success:
                     successful_indexes += 1
                     st.success(f"✅ Indexed: {title}")
-                    delete_file(filename)
-                    
                 else:
-                    st.error(f"Failed to index: {title}")
+                    st.error(f"Failed to index: {title} - {result}")
                     
             except Exception as e:
                 st.error(f"Indexing error for {title}: {str(e)}")
@@ -687,9 +1032,48 @@ def initial_setup():
     )
 
     st.subheader("Model Selection")
-    st.info("Marengo 2.7 as the default model for all indexes.")
+    st.info("Select the models you want to use for indexing.")
+    
 
-    use_pegasus = st.checkbox("Add Pegasus 1.2 to enhance indexing capabilities")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        use_marengo = st.checkbox("Marengo 2.7", value=True, 
+                                help="Marengo 2.7 provides advanced visual and audio understanding capabilities")
+        
+        marengo_options = []
+        if use_marengo:
+            st.markdown("#### Marengo Options")
+            marengo_visual = st.checkbox("Visual", value=True, key="marengo_visual")
+            marengo_audio = st.checkbox("Audio", value=True, key="marengo_audio")
+            if marengo_visual:
+                marengo_options.append("visual")
+            if marengo_audio:
+                marengo_options.append("audio")
+    
+    with col2:
+        use_pegasus = st.checkbox("Pegasus 1.2", value=False,
+                                help="Pegasus 1.2 enhances indexing with additional visual features and audio capabilities")
+        
+        pegasus_options = []
+        if use_pegasus:
+            st.markdown("#### Pegasus Options")
+            pegasus_visual = st.checkbox("Visual", value=True, key="pegasus_visual")
+            pegasus_audio = st.checkbox("Audio", value=True, key="pegasus_audio")
+            if pegasus_visual:
+                pegasus_options.append("visual")
+            if pegasus_audio:
+                pegasus_options.append("audio")
+            
+            st.info("⚠️ Note: Pegasus model has a 59-minute limit for videos. Longer videos will be automatically chunked.")
+    
+
+    st.subheader("Addon Selection")
+    use_thumbnail = st.checkbox("Thumbnail", value=True, help="Generate thumbnails for indexed videos")
+    
+    addons = []
+    if use_thumbnail:
+        addons.append("thumbnail")
     
     if st.button("Initialize Application"):
         if not api_key:
@@ -698,44 +1082,64 @@ def initial_setup():
         if not index_name:
             st.error("⚠️ Please enter an index name")
             return
+        if not use_marengo and not use_pegasus:
+            st.error("⚠️ Please select at least one model")
+            return
+        if use_marengo and not marengo_options:
+            st.error("⚠️ Please select at least one option for Marengo")
+            return
+        if use_pegasus and not pegasus_options:
+            st.error("⚠️ Please select at least one option for Pegasus")
+            return
             
         try:
             with st.spinner("Setting up your index..."):
                 client = TwelveLabs(api_key=api_key)
                 
-                models = [
-                    {
+                models = []
+                
+                if use_marengo:
+                    models.append({
                         "name": "marengo2.7",
-                        "options": ["visual", "audio"]
-                    }
-                ]
+                        "options": marengo_options
+                    })
                 
                 if use_pegasus:
-                    models.insert(0, {
+                    models.append({
                         "name": "pegasus1.2",
-                        "options": ["visual", "audio"]
+                        "options": pegasus_options
                     })
+                    # Set flag to enable chunking for Pegasus
+                    st.session_state.need_chunking_for_pegasus = True
+                else:
+                    st.session_state.need_chunking_for_pegasus = False
                 
                 index = client.index.create(
                     name=index_name,
                     models=models,
-                    addons=["thumbnail"]
+                    addons=addons
                 )
                 
                 st.session_state.api_key = api_key
                 st.session_state.index = index
                 st.session_state.setup_complete = True
                 
-                model_names = [model["name"] for model in models]
+                model_details = []
+                for model in models:
+                    model_details.append(f"{model['name']} ({', '.join(model['options'])})")
+                
                 st.success(f"""
                 ✅ Setup completed successfully!
-                📊 Active Models: {", ".join(model_names)}
+                📊 Active Models: {' and '.join(model_details)}
+                {'🖼️ Thumbnail addon enabled' if 'thumbnail' in addons else ''}
                 """)
                 time.sleep(1)
                 st.rerun()
                 
         except Exception as e:
             st.error(f"❌ Setup failed: {str(e)}")
+
+
 
 def main():
     if not st.session_state.setup_complete or not st.session_state.index:
