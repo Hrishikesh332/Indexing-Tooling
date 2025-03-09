@@ -1,7 +1,7 @@
 <div align="center">
     <h1>Twelve Labs UGC Indexer</h1>
     <p>
-        <h> Indexing UGC videos using Twelve Labs AI video understanding platform. This tool enables - downloading, processing, and indexing of YouTube videos, making them searchable and analyzable through the Twelve Labs API. </h>
+        <h> Indexing UGC videos using Twelve Labs AI video understanding platform. This tool enables - downloading, processing, and indexing of videos, making them searchable and analyzable through the Twelve Labs API. </h>
     </p>
 </div>
 
