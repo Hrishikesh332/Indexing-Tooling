@@ -1,5 +1,5 @@
 streamlit
-twelvelabs
+twelvelabs==0.4.11
 python-dotenv
 requests
 yt-dlp
